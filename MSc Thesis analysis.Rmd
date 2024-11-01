@@ -1,0 +1,952 @@
+---
+title: "Data preprocessing"
+author: "Helle"
+date: "2024-10-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+
+pacman::p_load(devtools, tidyverse, patchwork, RMoCap, readxl, dtw, lme4, lmerTest, sjPlot, trajr, rgl, purrr, ordinal, scales, effects )
+
+```
+
+
+```{r}
+#Fixing 19_s0 which was botched because of the fall.  
+
+one <- read.delim("C:/Users/helle/OneDrive - Aarhus Universitet/AU/10th semester/TSVs/19_s0_1.tsv", header = TRUE, sep = "\t")
+two <- read.delim("C:/Users/helle/OneDrive - Aarhus Universitet/AU/10th semester/TSVs/19_s0_2.tsv", header = TRUE, sep = "\t")
+
+
+one <- as.data.frame(one)
+two <- as.data.frame(two)
+
+two$Frame <- two$Frame + 1821
+two$Time <- two$Time + 0.06700
+
+combined_df <- rbind(one, two)
+
+write.table(combined_df, file = "C:/Users/helle/OneDrive - Aarhus Universitet/AU/10th semester/TSVs/19_s0.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+
+
+```{r read all the tsv's}
+# Step 1: List all TSV files in the specified directory
+files <- list.files(path = "C:/Users/helle/OneDrive - Aarhus Universitet/AU/10th semester/TSVs/", pattern = "*.tsv", full.names = TRUE)
+
+
+# Step 2: Read each TSV file, adding the filename as a new column
+file_list <- lapply(files, function(file) {
+  df <- read.delim(file, sep = "\t", header = TRUE)
+  df$filename <- tools::file_path_sans_ext(basename(file)) # Add filename as a new column
+  return(df)
+})
+
+#Step 3: Combine all the dataframes into one
+combined_df <- bind_rows(file_list)
+
+
+# Create the "participant" column by extracting numbers before the underscore in the "filename" column
+combined_df$participant <- sub("^(\\d+)_.*", "\\1", combined_df$filename)
+
+#Rename dataframe
+data <- combined_df
+
+#make it into a factor
+data$participant <- as.factor(data$participant)
+
+# Create a "trial" column by extracting the pattern after the underscore
+data$trial <- sub("^\\d+_(.*)", "\\1", data$filename)
+
+# Create a "condition" column by extracting only the letter after the underscore
+data$condition <- sub("^\\d+_([A-Za-z]).*", "\\1", data$filename)
+
+# Create a "stones" column by extracting only the last digit in the string
+data$stones <- sub(".*(\\d)$", "\\1", data$filename)
+
+data$stones <- as.factor(data$stones)
+
+
+data <- data %>% 
+  rename(trial_type = trial)
+```
+
+
+
+```{r experimental data from excel}
+
+
+info <- read_excel("C:/Users/helle/OneDrive - Aarhus Universitet/AU/10th semester/Data/Eksperimentiel data.xlsx", sheet = 1)
+
+
+
+
+info_long <- info %>%
+  pivot_longer(
+    cols = starts_with("Trial_"),  # Specify columns to pivot
+    names_to = "Trial",            # Name for the new key column
+    values_to = "Value"            # Name for the new value column
+  )
+
+info_long <- info_long %>% 
+  rename(trial_type = Value)
+
+info_long <- info_long %>%
+  mutate(Trial = sub(".*_(\\d+)$", "\\1", Trial))  # Keep only the last digit
+
+
+
+# Pivot the accuracy columns
+accuracy_long <- info %>%
+  pivot_longer(
+    cols = ends_with("_acc"),  # Specify columns to pivot
+    names_to = "trial_type",        # Name for the new key column
+    values_to = "accuracy"     # Name for the new value column
+  ) %>%
+  mutate(trial_type = sub(".*_(\\d+)$", "\\1", trial_type))  # Keep only the last digit
+
+# Extract only the letter and digit before the underscore from the "trial" column
+accuracy_long$trial_type <- sub("^(.*)_[A-Za-z0-9]*$", "\\1", accuracy_long$trial_type)
+
+# Deleting the trial columns 
+accuracy_long <- accuracy_long %>% select(-Trial_1,-Trial_2, -Trial_3, -Trial_4, -Trial_5,-Trial_6)
+
+# Deleting the trial_acc columns from info_long 
+info_long <- info_long %>%  select(-k0_acc,-k1_acc, -h0_acc, -h1_acc, -s0_acc, -s1_acc)
+
+
+#Merge the two dfs
+# Merge the info and accuracy dataframes
+info_combined <- info_long %>%
+  left_join(accuracy_long, by = c("participant_no", "Gender", "Ethnicity", "Samtykke til brug af materiale", "Noter",  "k1_sten" ,"h1 _sten","s1_sten" ,"trial_type", "age"))
+
+
+info_combined <- info_combined %>% 
+  rename(participant = participant_no)
+
+data <- data %>% 
+  rename(trial_type = trial)
+
+
+# Create the new column 'condition' using the first letter of 'trial_type'
+info_combined <- info_combined %>%
+  mutate(condition = substr(trial_type, 1, 1))
+
+
+info_combined <- info_combined %>% 
+  mutate(condition = case_when(
+    condition == "h" ~ "Speed",
+    condition == "k" ~ "Control",
+    condition == "s" ~ "Fun"
+  ))
+
+# #make triel_type column with explained names
+# info_combined <- info_combined %>% 
+#   mutate(trial_type_expl = case_when(
+#     trial_type == "h0" ~ "Speed_0",
+#     trial_type == "h1" ~ "Speed_1",
+#     trial_type == "s0" ~ "Fun_0",
+#     trial_type == "s1" ~ "Fun_1",
+#     trial_type == "k0" ~ "Control_0",
+#     trial_type == "k1" ~ "Control_1"
+#   ))
+
+# Create a "stones" column by extracting only the last digit in the string
+info_combined$stones <- sub(".*(\\d)$", "\\1", info_combined$trial_type)
+
+```
+
+```{r combining all the data}
+
+info_combined$participant <- as.factor(info_combined$participant)
+info_combined$trial_type <- as.factor(info_combined$trial_type)
+info_combined$condition <- as.factor(info_combined$condition)
+data$trial_type <- as.factor(data$trial_type)
+
+# Create a unique list of participants and trial_types from the data dataframe
+participants <- unique(data$participant)
+trial_types <- unique(data$trial_type)
+
+# Create a dataframe with all combinations of participants and trial_types
+expanded_info_combined <- expand.grid(participant = participants, trial_type = trial_types)
+
+# Merge the expanded grid with info_combined
+expanded_info_combined <- expanded_info_combined %>%
+  left_join(info_combined, by = c("participant", "trial_type"))
+
+
+
+# Merge the data dataframe with the expanded info_combined dataframe
+merged_df <- data %>%
+  left_join(expanded_info_combined, by = c("participant", "trial_type"))
+
+#Rename
+df <- merged_df
+
+#Renaming columns for convenience
+df <- df %>%  
+  rename(h1_stones = `h1 _sten`)
+
+df <- df %>% 
+  rename(k1_stones = k1_sten)
+
+df <- df %>% 
+  rename(s1_stones = s1_sten)
+
+#Create a column for stones by condition 
+
+df <- df %>% 
+  mutate(stones_by_cond = case_when(
+    condition == "h" ~ h1_stones,
+    condition == "k" ~ k1_stones,
+    condition == "s" ~ s1_stones
+  ))
+ 
+
+#rename condition column 
+df <- df %>% 
+  mutate(condition = case_when(
+    condition == "h" ~ "Speed",
+    condition == "k" ~ "Control",
+    condition == "s" ~ "Fun"
+  ))
+
+
+
+#make triel_type column with explained names
+df <- df %>% 
+  mutate(trial_type_expl = case_when(
+    trial_type == "h0" ~ "Speed_0",
+    trial_type == "h1" ~ "Speed_1",
+    trial_type == "s0" ~ "Fun_0",
+    trial_type == "s1" ~ "Fun_1",
+    trial_type == "k0" ~ "Control_0",
+    trial_type == "k1" ~ "Control_1"
+  ))
+
+#creating time_spent column 
+df <- df %>%
+  # Group by participant and trial
+  group_by(participant, Trial) %>%
+  
+  # Arrange the data by Frame for each participant and trial
+  arrange(Frame) %>%
+  
+  # Create a new column 'time_spent' which is the last value of Time in each group
+  mutate(time_spent = last(Time)) %>%
+  
+  # Ungroup to return to regular dataframe structure
+  ungroup()
+
+
+
+
+df <- df %>%
+  # Use the filter function to keep only rows that do not meet the removal criteria
+  filter(
+    !(
+      # Specify the conditions for each filename
+      (filename == "26_k1" & Frame >= 1297 & Frame <= 2679) |
+      (filename == "27_h1" & Frame >= 764 & Frame <= 1311) |
+      (filename == "32_k1" & Frame >= 1030 & Frame <= 2682) |
+      (filename == "10_k1" & Frame >= 1193 & Frame <= 1706)
+    )
+  )
+
+#Correct the time_spent column for the trails with cutouts
+time_durations <- df %>%
+  filter(
+    (filename == "26_k1" & Frame >= 1296 & Frame <= 2680) |
+    (filename == "27_h1" & Frame >= 763 & Frame <= 1312) |
+    (filename == "32_k1" & Frame >= 1029 & Frame <= 2683) |
+    (filename == "10_k1" & Frame >= 1192 & Frame <= 1707)
+  ) %>%
+  group_by(filename) %>%
+  summarise(
+    time_to_subtract = max(Time) - min(Time)  # Calculate the duration within the specified range
+  )
+
+# #ONLY RUN THIS ONCE!
+# df <- df %>%
+#   # Update time_spent for each of the specific filenames
+#   mutate(
+#     time_spent = case_when(
+#       filename == "26_k1" ~ time_spent - (time_durations$time_to_subtract[2]),
+#       filename == "27_h1" ~ time_spent - (time_durations$time_to_subtract[3]),
+#       filename == "32_k1" ~ time_spent - (time_durations$time_to_subtract[4]),
+#       filename == "10_k1" ~ time_spent - (time_durations$time_to_subtract[1]),
+#       TRUE ~ time_spent  # Keep the original time_spent for other rows
+#     )
+#   )
+
+
+
+str(df)
+df$age <- as.numeric(df$age)
+df$stones_by_cond <- as.factor(df$stones_by_cond)
+df$Trial <- as.factor(df$Trial)
+df$Gender <- as.factor(df$Gender)
+df$condition <- as.factor(df$condition)
+df$filename <- as.factor(df$filename)
+
+
+#save 
+write.csv(df, "df_ucloud.csv")
+
+
+
+```
+
+
+```{r create df for only stone trials}
+
+#Split the data into stone trials and not stone trials 
+
+
+stone_trials <- df %>% filter(stones == 1)
+
+classic <- df %>% filter(stones == 0)
+
+```
+
+```{r plot exploring}
+
+colours <- c("#ffd400",
+             "#dd1a22",
+             "#00af4d",
+             "#006cb7",
+             "#4c2f92",
+             "#f6adcd")
+
+
+
+# Group by "participant" and count unique instances in "stones_by_cond" per participant
+count_df <- stone_trials%>%
+  group_by(participant, condition) %>%                       # Group by participant
+  summarise(stones_by_cond = unique(stones_by_cond))  # Count distinct values in stones_by_cond
+
+
+count_df$condition <- factor(count_df$condition, levels = c("Control", "Speed", "Fun"))
+
+# Create the bar plot using ggplot2
+count_df %>% 
+  ggplot(aes(x = as.factor(stones_by_cond), fill = as.factor(condition))) +
+  geom_bar(position = 'dodge') +
+  labs(x = "Stones", y = "Count", fill = "Condition") +
+  theme_minimal()+
+  ggtitle("Stones by condition")+
+   geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, position = position_dodge(width = .9))
+ 
+stones_bar <- count_df %>% 
+  ggplot(aes(x = as.factor(condition), fill =as.factor(stones_by_cond) )) +
+  geom_bar(position = position_dodge(width = .8), width = 0.7, colour = 'darkblue') +
+  labs(x = "Condition", y = "Count", fill = "Stones") +
+  theme_minimal()+
+   ggtitle("Count of Stones per Condition")+
+   geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, position = position_dodge(width = .8))+
+  scale_fill_manual(values = colours[4:6])
+ 
+
+count_df$stones_by_cond <- as.numeric(count_df$stones_by_cond)
+
+
+stones_violin <- count_df %>%
+  ggplot(aes(x = condition, y = stones_by_cond, fill = condition)) +
+  geom_violin(colour = 'darkblue') +  # Violin plot with no fill
+  #theme_minimal() +
+  labs(color = "Stones") +
+  ggtitle("A) Density of Number of Stones Chosen per Condition")+
+  labs(x = "Condition", y = "Density", fill = "Condition") +
+   scale_fill_manual(values = colours)
+
+
+
+stones_bar2 <- count_df %>% 
+  ggplot(aes(x = as.factor(stones_by_cond), fill = as.factor(stones_by_cond))) +
+  geom_bar(position = position_dodge(width = .8), width = 0.7, colour = 'darkblue') +
+  labs(x = "Number of Stones Chosen", y = "Count", fill = "Number of Stones") +
+   ggtitle("B) Count of Number of Stones Chosen for Each Condition")+
+   geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, position = position_dodge(width = .8))+
+  scale_fill_manual(values = colours[4:6])+
+  facet_wrap(~condition)
+
+stones_violin + stones_bar2
+```
+
+
+
+
+```{r accuracy plots}
+
+# Reorder manually by specifying the desired order
+df$condition <- factor(df$condition, levels = c("Control", "Speed", "Fun"))
+df <- df %>% arrange(condition)
+
+
+info_combined$condition <- factor(info_combined$condition, levels = c("Control", "Speed", "Fun"))
+info_combined <- info_combined %>% arrange(condition)
+
+info_combined %>% 
+ggplot( aes(x = trial_type_expl, y = accuracy, fill = trial_type_expl)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(x = "Trial Type", y = "Accuracy", fill = "Trial type", title = "Boxplot of Accuracy by Trial Type")+
+  scale_fill_manual(values = colours)
+
+info_combined %>% 
+  ggplot( aes(x = condition, y = accuracy, fill = stones)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(x = "Condition", y = "Accuracy",  fill = "Stones", title = "Accuracy by Trial Type")+
+   scale_fill_manual(values = colours)
+
+df %>% 
+ggplot( aes(x = stones, y = accuracy, fill = stones)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(x = "Stones or not", y = "Accuracy", title = "Boxplot of Accuracy by stones or no stones")
+```
+
+
+
+### LET'S DO STATS!!! ###
+
+
+```{r accuracy models}
+df$condition <- factor(df$condition, levels = c("Control", "Speed", "Fun"))
+
+acc_max <- lmer(accuracy ~ condition*stones + age + Gender + (1|Trial) + (1 | participant), df)
+
+summary(acc_max)
+
+plot(effects::allEffects(acc_max))
+
+plot(effects::predictorEffect("stones", acc_max))
+
+acc_max_2 <- lmer(accuracy ~ condition:stones + age + Gender + (1|Trial) + (1 | participant), df)
+
+summary(acc_max_2)
+
+acc_null <- lmer(accuracy ~ 1 + (1|Trial) + (1| participant), df )
+
+summary(acc_null)
+
+
+acc_min <- lmer(accuracy ~ age + Gender + (1|Trial)+ (1| participant), df)
+summary(acc_min)
+
+
+
+acc_condition <- lmer(accuracy ~ condition + age + Gender + (1|Trial) + (1| participant), df)
+
+summary(acc_condition)
+
+
+acc_stones <- lmer(accuracy ~ stones + age + Gender + (1|Trial) + (1| participant), df)
+
+summary(acc_stones)
+
+
+acc_cond_stone <- lmer(accuracy ~ stones + condition + age + Gender + (1|Trial) + (1| participant), df)
+
+summary(acc_cond_stone)
+
+
+
+#the lower the better
+AIC(acc_max, acc_min, acc_2, acc_condition, acc_stones, acc_null, acc_cond_stone)
+
+#Max explains most variance
+
+
+```
+
+```{r time spent}
+time_max <- lmer(time_spent ~ condition*stones + age + Gender + (1|Trial) + (1 | participant), df)
+
+summary(time_max)
+
+time_null <- lmer(time_spent ~ 1 + (1|Trial) + (1| participant), df )
+
+summary(time_null)
+
+time_min <- lmer(time_spent ~ age + Gender + (1|Trial) + (1| participant), df)
+summary(time_min)
+
+
+time_condition <- lmer(time_spent ~ condition + age + Gender + (1|Trial) + (1| participant), df)
+
+summary(time_condition)
+
+
+time_stones <- lmer(time_spent ~ stones + age + Gender + (1|Trial) + (1| participant), df)
+
+summary(time_stones)
+
+
+time_cond_stone <- lmer(time_spent ~ stones + condition + age + Gender + (1|Trial) + (1| participant), df)
+
+summary(time_cond_stone)
+
+
+#the lower the better
+AIC(time_max, time_min, time_condition, time_stones, time_cond_stone, time_null)
+
+#Max explains most variance
+
+
+#Just to make sure, here's an extra test without the five trials where the middle has been cut out
+
+timedf_minus_nomiddle <- df %>% 
+  filter(filename != "26_k1" & filename != "27_h1" & filename != "32_k1" & filename != "10_k1" & filename != "19_s0")
+
+time_max_extra <- lmer(time_spent ~ condition*stones + age + Gender + (1|Trial) + (1 | participant), timedf_minus_nomiddle)
+
+summary(time_max_extra)
+
+
+```
+
+
+```{r time plots}
+summarized_time <-  df %>%
+  # Group by participant and trial
+  group_by(participant, Trial) %>%
+  
+  # Arrange the data by Frame for each participant and trial
+  arrange(Frame) %>%
+  
+  # Create a new column 'time_spent' which is the last value of Time in each group
+ summarise(
+    time_spent = last(Time),  # Last value of Time
+    condition = first(condition), 
+    stones = first(stones)
+  ) %>%
+  
+  # Ungroup to return to regular dataframe structure
+  ungroup()
+  
+# Reorder manually by specifying the desired order
+summarized_time$condition <- factor(summarized_time$condition, levels = c("Control", "Speed", "Fun"))
+#summ <- df %>% arrange(condition)  
+
+
+
+summarized_time_clean <-  summarized_time %>% 
+  filter(abs(time_spent - mean(time_spent)) <= 3 * sd(time_spent))
+  
+summarized_time_clean %>%   
+ggplot( aes(x = condition, y = time_spent, fill = stones)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(x = "Condition", y = "Time spent playing hopscotch", title = "Time spent playing hopscotch by condition and stones", fill = "Stones")+
+  scale_fill_manual(values = colours)
+
+```
+
+
+
+```{r stones stats}
+
+stone_trials$stones_by_cond <- as.numeric(stone_trials$stones_by_cond)
+stone_trials$age <- as.numeric(stone_trials$age)
+
+stones_null <- lmer(stones_by_cond ~ 1 + (1|participant), data = stone_trials)
+
+summary(stones_null)
+
+
+stones_max <- lmer(stones_by_cond ~  condition + age + Gender + (1 | Trial) + (1|participant), data = stone_trials)
+
+summary(stones_max)
+
+
+
+stones_age <- lmer(stones_by_cond ~  age + (1|participant), data = stone_trials)
+
+summary(stones_age)
+
+stones_gender <- lmer(stones_by_cond ~  Gender + (1 | Trial) + (1|participant), data = stone_trials)
+
+summary(stones_gender)
+
+stones_age_gender <- lmer(stones_by_cond ~  age + Gender + (1 | Trial) + (1|participant), data = stone_trials)
+
+summary(stones_age_gender)
+
+
+AIC(stones_null, stones_max, stones_age, stones_gender, stones_age_gender )
+
+```
+
+
+### DYNAMIC TIME WARPING ### 
+
+
+```{r prep for DTW}
+
+# Preppin matrixes to perform dtw on. 
+
+# Filtering data for participant 13 and different trial types
+dtw_df_13_k0 <- df %>% filter(participant == 13 & trial_type == "k0")
+dtw_df_13_k1 <- df %>% filter(participant == 13 & trial_type == "k1")
+dtw_df_13_s0 <- df %>% filter(participant == 13 & trial_type == "s0")
+dtw_df_13_s1 <- df %>% filter(participant == 13 & trial_type == "s1")
+dtw_df_13_h0 <- df %>% filter(participant == 13 & trial_type == "h0")
+dtw_df_13_h1 <- df %>% filter(participant == 13 & trial_type == "h1")
+
+# Filtering data for participant 5 and different trial types
+dtw_df_5_k0 <- df %>% filter(participant == 5 & trial_type == "k0")
+dtw_df_5_k1 <- df %>% filter(participant == 5 & trial_type == "k1")
+dtw_df_5_s0 <- df %>% filter(participant == 5 & trial_type == "s0")
+dtw_df_5_s1 <- df %>% filter(participant == 5 & trial_type == "s1")
+dtw_df_5_h0 <- df %>% filter(participant == 5 & trial_type == "h0")
+dtw_df_5_h1 <- df %>% filter(participant == 5 & trial_type == "h1")
+
+
+# Convert them to matrices for participant 13
+q_13_k0 <- as.matrix(dtw_df_13_k0[, c("head.X", "head.Y", "head.Z")])
+r_13_k1 <- as.matrix(dtw_df_13_k1[, c("head.X", "head.Y", "head.Z")])
+q_13_s0 <- as.matrix(dtw_df_13_s0[, c("head.X", "head.Y", "head.Z")])
+r_13_s1 <- as.matrix(dtw_df_13_s1[, c("head.X", "head.Y", "head.Z")])
+q_13_h0 <- as.matrix(dtw_df_13_h0[, c("head.X", "head.Y", "head.Z")])
+r_13_h1 <- as.matrix(dtw_df_13_h1[, c("head.X", "head.Y", "head.Z")])
+
+
+# Convert them to matrices for participant 5
+q_5_k0 <- as.matrix(dtw_df_5_k0[, c("head.X", "head.Y", "head.Z")])
+r_5_k1 <- as.matrix(dtw_df_5_k1[, c("head.X", "head.Y", "head.Z")])
+q_5_s0 <- as.matrix(dtw_df_5_s0[, c("head.X", "head.Y", "head.Z")])
+r_5_s1 <- as.matrix(dtw_df_5_s1[, c("head.X", "head.Y", "head.Z")])
+q_5_h0 <- as.matrix(dtw_df_5_h0[, c("head.X", "head.Y", "head.Z")])
+r_5_h1 <- as.matrix(dtw_df_5_h1[, c("head.X", "head.Y", "head.Z")])
+```
+
+
+```{r DTW within participant}
+# Run DTW alignment for participant 13, condition k
+alignment_13_k <- dtw(q_13_k0, r_13_k1, dist.method = "Euclidean", keep = TRUE)
+
+# Run DTW alignment for participant 13, condition s
+alignment_13_s <- dtw(q_13_s0, r_13_s1, dist.method = "Euclidean", keep = TRUE)
+
+# Run DTW alignment for participant 13, condition h
+alignment_13_h <- dtw(q_13_h0, r_13_h1, dist.method = "Euclidean", keep = TRUE)
+
+
+
+# Run DTW alignment for participant 5, condition k
+alignment_5_k <- dtw(q_5_k0, r_5_k1, dist.method = "Euclidean", keep = TRUE)
+
+# Run DTW alignment for participant 5, condition s
+alignment_5_s <- dtw(q_5_s0, r_5_s1, dist.method = "Euclidean", keep = TRUE)
+
+# Run DTW alignment for participant 5, condition h
+alignment_5_h <- dtw(q_5_h0, r_5_h1, dist.method = "Euclidean", keep = TRUE)
+
+
+#Plotting
+
+# Extract distances for participant 13
+distances_13 <- c(
+  alignment_13_k$distance,
+  alignment_13_s$distance,
+  alignment_13_h$distance
+)
+
+# Extract distances for participant 5
+distances_5 <- c(
+  alignment_5_k$distance,
+  alignment_5_s$distance,
+  alignment_5_h$distance
+)
+
+# Combine distances into a data frame
+distance_df_participants <- data.frame(
+  condition = rep(c("Control", "Fun", "Speed"), 2),
+  distance = c(distances_13, distances_5),
+  participant = rep(c("Participant 13", "Participant 5"), each = 3)
+)
+
+distance_df_participants$condition <- factor(distance_df_participants$condition, levels = c("Control", "Speed", "Fun"))
+
+distance_df_participants$participant <- factor(distance_df_participants$participant, levels = c("Participant 5", "Participant 13"))
+
+# Create a bar plot of distances
+ggplot(distance_df_participants, aes(x = condition, y = distance, fill = participant)) +
+  geom_bar(stat = "identity", position = position_dodge(width = .8), width = 0.7, colour = 'white')+
+  theme_minimal() +
+  labs(x = "Condition", y = "DTW Distance", fill = "Participant", title = "DTW Distances for The Three Conditions and Each Participant") +
+  theme(legend.position = "right") +
+  scale_fill_manual(values = colours[3:4])+
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = "."))
+```
+
+
+```{r DTW across participants}
+# Combine k0 from participant 13 and k0 from participant 5
+alignment_k0 <- dtw(q_13_k0, q_5_k0, dist.method = "Euclidean", keep = TRUE)
+
+# Combine k1 from participant 13 and k1 from participant 5
+alignment_k1 <- dtw(r_13_k1, r_5_k1, dist.method = "Euclidean", keep = TRUE)
+
+
+# Combine s0 from participant 13 and s0 from participant 5
+```
+
+
+```{r DTW across participants}
+
+# defining some functions
+get_participant_matrix <- function(df, participantID, trial){
+  # get the data for the given participant on the given condition
+  part_subset <- df %>% 
+    filter(participant == participantID, trial_type == trial)
+  
+  # turn it into a matrix with only the necessary columns
+  dtw_matrix <- as.matrix(part_subset[, c("head.X", "head.Y", "head.Z")])
+
+  return(dtw_matrix)
+
+}
+
+distance_two_participants <- function(df, participant1, participant2, condition){
+  # first create a matrix for each participant and then calculate the dtw 
+  part1_matrix <- get_participant_matrix(df, participant1, condition)
+  
+  part2_matrix <- get_participant_matrix(df, participant2, condition)
+  
+  alignment <- dtw(part1_matrix, part2_matrix, dist.method = "Euclidean", keep = TRUE)
+  
+  return(alignment$distance)
+}
+
+mia_process_data <- function(df, trials, participants){
+  # full function B-)
+  
+  # make a list of all the pairs of participants without repeating pairs (e.g., both 1,2 and 2,1)
+  pairs <- combn(participants, 2, simplify = T)
+  
+  # prepare the matrix for the distances 
+  distances_matrix <- matrix(NA, nrow = length(trial_types),ncol = ncol(pairs))
+  # set the rownames and colnames -> trials and participant pairs
+  rownames(distances_matrix) <- trials 
+  colnames(distances_matrix) <- apply(pairs,2, function(pair) paste(pair, collapse = "_"))
+  
+  # let's loooop
+  for (i_trial in 1:length(trial_types)){
+    # for each n trial, get the name of the trial
+    trial <- trial_types[i_trial]
+  
+    for (j_pair in 1:ncol(pairs)) {
+      # for each n pair of pairs, get the pair
+      pair <- pairs[, j_pair]
+      
+      # calculate the distance
+      distance <- distance_two_participants(df, pair[1], pair[2], trial)
+      
+      # save the distance in the matrix
+      distances_matrix[i_trial, j_pair] <- distance
+    }
+  }
+  # return the matrix 
+  return(distances_matrix)
+}
+
+
+```
+
+```{r}
+trial_types <- c("k0", "k1", "s0", "s1", "h0", "h1")
+participant_ids <- c(1,2,3) # lav om til e.g., df$ids 
+
+distances <- mia_process_data(df, trial_types, participant_ids)
+```
+
+
+
+```{r distance plot}
+distances_all <- read.csv("C:/Users/helle/OneDrive - Aarhus Universitet/AU/10th semester/Master thesis/dtw_across_particpants.csv")
+
+dtw_df <- as.data.frame(distances_all)
+
+# # Convert row names to a column
+# dtw_df <- dtw_df %>%
+#   rownames_to_column(var = "row_name")
+
+# Pivot the data frame
+df_pivot <- dtw_df %>%
+  pivot_longer(cols = -"X", names_to = "pair", values_to = "distance")
+
+df_pivot <- df_pivot %>% 
+  rename(trial_type = X)
+
+#create participant columns
+df_pivot <- df_pivot %>%
+  separate(col = pair, into = c("participant_1", "participant_2"), sep = "_", remove = FALSE)
+
+# Remove the 'X' from participant_1
+df_pivot$participant_1 <- gsub("X", "", df_pivot$participant_1)
+
+
+
+
+df_pivot %>% 
+ggplot( aes(x = as.factor(trial_type), y = distance, fill = trial_type)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(x = "Trial Type", y = "DTW Distance", fill = "Trial type", title = "DTW Distance Across Participants per Trial Type")+
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = ".")) +
+  scale_fill_manual(values = colours)
+
+
+#remove outliers that are more than 3 standard deviations from the mean
+df_clean <- df_pivot %>%
+  filter(abs(distance - mean(distance)) <= 3 * sd(distance))
+
+df_clean %>% 
+ggplot( aes(x = as.factor(trial_type), y = distance, fill = trial_type)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(x = "Trial Type", y = "DTW Distance", fill = "Trial type", title = "DTW Distance Across Participants per Trial Type")+
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = ".")) +
+  scale_fill_manual(values = colours)
+
+
+
+
+df_clean <- df_clean %>% 
+  mutate(condition = case_when(
+    trial_type == "h0" ~ "Speed",
+    trial_type == "h1" ~ "Speed",
+    trial_type == "k0" ~ "Control",
+    trial_type == "k1" ~ "Control",
+    trial_type == "s0" ~ "Fun",
+    trial_type == "s1" ~ "Fun"
+  ))
+
+
+df_clean <- df_clean %>% 
+  mutate(stones = case_when(
+    trial_type == "h0" ~ 0,
+    trial_type == "h1" ~ 1,
+    trial_type == "k0" ~ 0,
+    trial_type == "k1" ~ 1,
+    trial_type == "s0" ~ 0,
+    trial_type == "s1" ~ 1
+  ))
+```
+
+
+```{r distance plot clean }
+df_clean$condition <- factor(df_clean$condition, levels = c("Control", "Speed", "Fun"))
+
+df_clean %>% 
+ggplot( aes(x = as.factor(condition), y = distance, fill = as.factor(stones))) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(x = "Condition", y = "DTW Distance", fill = "Stones", title = "DTW Distance Across Participants for Each Trial Type")+
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = ".")) +
+  scale_fill_manual(values = colours)
+```
+
+
+
+```{r dtw within perticipant - stones or no stones}
+
+# For Participant 13
+alignment_13_k0_s0 <- dtw(q_13_k0, q_13_s0, dist.method = "Euclidean", keep = TRUE)
+alignment_13_k0_h0 <- dtw(q_13_k0, q_13_h0, dist.method = "Euclidean", keep = TRUE)
+alignment_13_k1_s1 <- dtw(r_13_k1, r_13_s1, dist.method = "Euclidean", keep = TRUE)
+alignment_13_k1_h1 <- dtw(r_13_k1, r_13_h1, dist.method = "Euclidean", keep = TRUE)
+alignment_13_s0_h0 <- dtw(q_13_s0, q_13_h0, dist.method = "Euclidean", keep = TRUE)
+alignment_13_s1_h1 <- dtw(r_13_s1, r_13_h1, dist.method = "Euclidean", keep = TRUE)
+
+# For Participant 5
+alignment_5_k0_s0 <- dtw(q_5_k0, q_5_s0, dist.method = "Euclidean", keep = TRUE)
+alignment_5_k0_h0 <- dtw(q_5_k0, q_5_h0, dist.method = "Euclidean", keep = TRUE)
+alignment_5_k1_s1 <- dtw(r_5_k1, r_5_s1, dist.method = "Euclidean", keep = TRUE)
+alignment_5_k1_h1 <- dtw(r_5_k1, r_5_h1, dist.method = "Euclidean", keep = TRUE)
+alignment_5_s0_h0 <- dtw(q_5_s0, q_5_h0, dist.method = "Euclidean", keep = TRUE)
+alignment_5_s1_h1 <- dtw(r_5_s1, r_5_h1, dist.method = "Euclidean", keep = TRUE)
+
+
+
+# Extract distances for Participant 13
+distance_13_k0_s0 <- alignment_13_k0_s0$distance
+distance_13_k0_h0 <- alignment_13_k0_h0$distance
+distance_13_k1_s1 <- alignment_13_k1_s1$distance
+distance_13_k1_h1 <- alignment_13_k1_h1$distance
+distance_13_s0_h0 <- alignment_13_s0_h0$distance
+distance_13_s1_h1 <- alignment_13_s1_h1$distance
+
+# Extract distances for Participant 5
+distance_5_k0_s0 <- alignment_5_k0_s0$distance
+distance_5_k0_h0 <- alignment_5_k0_h0$distance
+distance_5_k1_s1 <- alignment_5_k1_s1$distance
+distance_5_k1_h1 <- alignment_5_k1_h1$distance
+distance_5_s0_h0 <- alignment_5_s0_h0$distance
+distance_5_s1_h1 <- alignment_5_s1_h1$distance
+
+
+
+# Create a data frame for distances
+distance_data_stones <- data.frame(
+  condition = c("C0 vs F0", "C0 vs S0", "C1 vs F1", "C1 vs S1", "F0 vs S0", "F1 vs S1",
+                "C0 vs F0", "C0 vs S0", "C1 vs F1", "C1 vs S1", "F0 vs S0", "F1 vs S1"),
+  participant = c(rep("Participant 13", 6), rep("Participant 5", 6)),
+  distance = c(
+    distance_13_k0_s0, distance_13_k0_h0, distance_13_k1_s1, distance_13_k1_h1,
+    distance_13_s0_h0, distance_13_s1_h1,
+    distance_5_k0_s0, distance_5_k0_h0, distance_5_k1_s1, distance_5_k1_h1,
+    distance_5_s0_h0, distance_5_s1_h1
+  ) ,
+  stones = rep(c("No stones", "No stones", "With stones", "With stones", "No stones", "With stones"), 2)
+)
+
+
+distance_data_stones$condition <- factor(distance_data_stones$condition, levels = c("C0 vs F0", "C0 vs S0","F0 vs S0", "C1 vs F1", "C1 vs S1",  "F1 vs S1"))
+
+distance_data_stones$participant <- factor(distance_data_stones$participant, levels = c("Participant 5", "Participant 13"))
+
+ggplot(distance_data_stones, aes(x = condition, y = distance, fill = stones)) +
+  geom_bar(stat = "identity",position = position_dodge(width = .8), width = 0.7, colour = 'white')+
+  labs(x = "Conditions", y = "DTW Distance", fill = "Stones", title = "DTW Distances Between Conditions For Non-stone Trials and Stone Trials") +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))+
+  scale_fill_manual(values = colours[5:6])+
+  facet_wrap(~participant)
+
+
+ggplot(distance_data_stones, aes(x = stones, y = distance, fill = stones)) +
+  geom_bar(stat = "identity",position = position_dodge(width = .8), width = 0.7, colour = 'white')+
+  labs(x = "Conditions", y = "DTW Distance", fill = "Stones", title = "DTW Distances Between Conditions For Non-stone Trials and Stone Trials") +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))+
+  scale_fill_manual(values = colours[5:6])+
+  facet_wrap(~participant)
+
+```
+
+
+
+
+```{r accuracy means}
+
+c <- info_combined %>% filter(condition == "Control")
+mean(c$accuracy)
+
+
+s <- info_combined %>% filter(condition == "Speed")
+mean(s$accuracy)
+
+
+f <- info_combined %>% filter(condition == "Fun")
+mean(f$accuracy)
+
+```
+
